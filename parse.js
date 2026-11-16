@@ -420,11 +420,17 @@ function findCloseBracket(text, b) {
       // `+(?!`)[^`]*?`+(?!`) — the closing run is the FIRST backtick run
       // after the opening run, of ANY length (no equal-length rule), so
       // `` a ` b `` closes at the single backtick and the later `` is
-      // unconsumable (the label fails). If there is no closing run, the
-      // run is consumable only as ``+(?=]) — 2+ backticks immediately
-      // before ']' — otherwise the label is invalid (no link).
+      // unconsumable (the label fails). BUT a run of 2+ backticks
+      // immediately before ']' is the ``+(?=]) alternative, which wins
+      // over the code-span reading (a run right before ']' cannot open
+      // a code span that closes before it) — check it FIRST, before
+      // searching for a closing run, or the search spans past the ']'
+      // to a later backtick (doc-33: '[less `` a ` b ``](...)' with a
+      // later '`a_b`' in the paragraph). If there is no closing run
+      // and it is not ``+(?=]), the label is invalid (no link).
       let k = j, len = 0;
       while (k < n && text.charCodeAt(k) === TICK) { k++; len++; }
+      if (len >= 2 && k < n && text.charCodeAt(k) === RBRACK) { j = k; continue; }
       let m = k, foundEnd = -1;
       while (m < n) {
         if (text.charCodeAt(m) === TICK) {
@@ -434,10 +440,7 @@ function findCloseBracket(text, b) {
         }
         m++;
       }
-      if (foundEnd < 0) {
-        if (len >= 2 && k < n && text.charCodeAt(k) === RBRACK) { j = k; continue; }
-        return -1;
-      }
+      if (foundEnd < 0) return -1;
       j = foundEnd; continue;
     }
     if (c === LBRACK) depth++;
@@ -1637,7 +1640,11 @@ function parseQuote(lines, i, links) {
       // with no blank line before it cannot start a new outer paragraph.)
       // Inside a fenced code block there is no paragraph: a fence line
       // stays literal (doc-10/12/14: '> function...' keeps no '>').
-      if (!tr.inCode() && prefix && !own && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
+      // A blank remainder is NOT a lazy continuation: it stays blank so
+      // it separates blocks (doc-33: a '>' line between two inner
+      // quotes ends the first inner quote; prepending the prefix turned
+      // it into a '> ' quote line that kept the quote open).
+      if (!tr.inCode() && prefix && !own && !isBlank(raw) && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
         c = prefix + raw;
       }
       if (own) prefix = own;
