@@ -938,11 +938,14 @@ function indentOf(s) {
 
 // Remove `cols` columns of leading whitespace; a tab that straddles the
 // boundary becomes spaces for its remainder.
-function stripCols(s, cols) {
+function stripCols(s, cols, keepTab) {
   // Strip `cols` columns of leading whitespace. Tabs expand to spaces by
   // original column (tab stops every 4). When cols is 0 nothing is
   // stripped and the line is returned untouched (tabs stay literal, which
-  // is what fenced-code content wants).
+  // is what fenced-code content wants). A tab encountered after the strip
+  // amount is reached is content: with keepTab it stays a literal tab
+  // (indented/fenced code, doc-02); otherwise it expands to spaces
+  // (container stripping, cm-005).
   if (cols === 0) return s;
   let col = 0, i = 0;
   let out = '';
@@ -955,6 +958,7 @@ function stripCols(s, cols) {
       const w = 4 - (col % 4);
       if (col + w <= cols) { col += w; i++; }
       else if (col < cols) { out += ' '.repeat(col + w - cols); col += w; i++; }
+      else if (keepTab) { out += '\t'; col += w; i++; }
       else { out += ' '.repeat(w); col += w; i++; }
     } else break;
   }
@@ -1520,6 +1524,14 @@ function parseBlocksInner(src, links, nested = false) {
   while (i < n) {
     const line = lines[i];
     if (isBlank(line)) {
+      // A whitespace-only (but non-empty) line inside a table paragraph
+      // is an empty table row, not a paragraph break (doc-26: a '\t' line
+      // becomes a row of empty cells). A truly empty line still breaks.
+      if (para && para.length >= 2 && line !== '' && isTablePara(para)) {
+        para.push('');
+        i++;
+        continue;
+      }
       flushPara();
       if (blocks.length > 0) pendingBlank = true;
       i++;
@@ -1554,12 +1566,12 @@ function parseBlocksInner(src, links, nested = false) {
           if (j < n && indentOf(lines[j]) >= 4) {
             // A whitespace-only line with code indent keeps its remaining
             // spaces (cm-112: '      ' -> '  ').
-            while (i < j) { codeLines.push(indentOf(lines[i]) >= 4 ? stripCols(lines[i], 4) : ''); i++; }
+            while (i < j) { codeLines.push(indentOf(lines[i]) >= 4 ? stripCols(lines[i], 4, true) : ''); i++; }
             continue;
           }
           break;
         }
-        if (indentOf(l) >= 4) { codeLines.push(stripCols(l, 4)); i++; }
+        if (indentOf(l) >= 4) { codeLines.push(stripCols(l, 4, true)); i++; }
         else break;
       }
       while (codeLines.length && codeLines[codeLines.length - 1] === '') codeLines.pop();
@@ -1581,7 +1593,7 @@ function parseBlocksInner(src, links, nested = false) {
       while (i < n) {
         const l = lines[i];
         if (matchFenceClose(l, fence.ch, fence.len)) { i++; closed = true; break; }
-        codeLines.push(stripCols(l, fence.indent));
+        codeLines.push(stripCols(l, fence.indent, true));
         i++;
       }
       // Pop at most one trailing blank line: the artifact of a final
@@ -1596,6 +1608,9 @@ function parseBlocksInner(src, links, nested = false) {
     if (para) {
       const setext = matchSetext(line);
       if (setext) {
+        // Inside a table paragraph, a line of '='/'-' is a table row,
+        // not a setext underline (doc-26: '=========' is a row).
+        if (para.length >= 2 && isTablePara(para)) { para.push(line); i++; continue; }
         // Setext heading text is trimmed (leading space of the first line,
         // trailing space of the last line).
         const ls = para.slice();
@@ -1658,6 +1673,15 @@ function splitTableRow(line) {
   cells.push(cur);
   if (cells.length > 1 && cells[cells.length - 1].trim() === '' && s.endsWith('|')) cells.pop();
   return cells;
+}
+
+function isTablePara(lines) {
+  // True when the paragraph's first two lines form a GFM table header
+  // and delimiter row (same test as mkBlockFromPara).
+  if (lines.length < 2 || indentOf(lines[1]) >= 4) return false;
+  const cells = splitTableRow(lines[0]);
+  const delim = splitTableRow(lines[1]);
+  return cells.length === delim.length && cells.length > 0 && delim.every(d => /^:?-+:?$/.test(d.trim()));
 }
 
 function mkBlockFromPara(lines, links) {
