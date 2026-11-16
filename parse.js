@@ -109,6 +109,15 @@ function cleanUrl(url) {
   return escAttr(u);
 }
 
+// Autolink hrefs: marked escapes EVERY '&' (its autolink renderer uses
+// the full escape, not the entity-preserving one), so '&amp;' in an
+// autolink URL becomes '&amp;amp;' in the href.
+function cleanUrlAuto(url) {
+  let u;
+  try { u = encodeURI(url).replace(/%25/g, '%'); } catch { u = url; }
+  return esc(u);
+}
+
 // Normalize a link reference label: collapse whitespace, trim, lowercase.
 function normLabel(s) {
   // Unicode case folding: ß/ẞ -> ss, final sigma ς -> σ (after lowercase).
@@ -302,7 +311,7 @@ function inlineParse(text, links, inLink) {
     }
     if (c === 58) { // ':': scheme autolink (mailto:, xmpp:, ...)
       if (!inLink) {
-        const res = trySchemeAutolink(text, i, runStart);
+        const res = trySchemeAutolink(text, i, runStart, delims);
         if (res) {
           flushText(res.start);
           nodes.push(res.html);
@@ -313,7 +322,7 @@ function inlineParse(text, links, inLink) {
     }
     if (c === AMP2) { // @: extended email autolink
       if (!inLink) {
-        const res = tryExtendedEmail(text, i, runStart);
+        const res = tryExtendedEmail(text, i, runStart, delims);
         if (res) {
           flushText(res.start);
           nodes.push(res.html);
@@ -659,11 +668,11 @@ function tryAutolink(text, i) {
   if (inner.length === 0) return null;
   const m = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.exec(inner);
   if (m) {
-    const href = cleanUrl(inner);
+    const href = cleanUrlAuto(inner);
     return { html: '<a href="' + href + '">' + esc(inner) + '</a>', end: j + 1 };
   }
   if (/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/.test(inner)) {
-    return { html: '<a href="mailto:' + escAttr(inner) + '">' + esc(inner) + '</a>', end: j + 1 };
+    return { html: '<a href="mailto:' + esc(inner) + '">' + esc(inner) + '</a>', end: j + 1 };
   }
   return null;
 }
@@ -764,15 +773,41 @@ function parseDomain(text, j) {
   return j;
 }
 
-// Real HTML named entities (for the autolink trailing-';' rule: the ';' is
-// kept only when it completes a real entity, not just a name-like pattern).
-const REAL_ENTITIES = new Set(('amp lt gt quot apos nbsp iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy reg macr deg plusmn sup2 sup3 acute micro para middot cedil sup1 ordm raquo frac14 frac12 frac34 iquest Agrave Aacute Acirc Atilde Auml Aring AElig Ccedil Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde Ograve Oacute Ocirc Otilde Ouml times Oslash Ugrave Uacute Ucirc Uuml Yacute THORN szlig agrave aacute acirc atilde auml aring aelig ccedil egrave eacute ecirc euml igrave iacute icirc iuml eth ntilde ograve oacute ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute thorn yuml fnof Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa Lambda Mu Nu Xi Omicron Pi Rho Sigma Tau Upsilon Phi Chi Psi Omega alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigmaf sigma tau upsilon phi chi psi omega thetasym upsih piv bull hellip prime Prime oline frasl weierp image real trade alefsym larr uarr rarr darr harr crarr lArr uArr rArr dArr hArr forall part exist empty nabla isin notin ni prod sum minus lowast radic prop infin ang and or cap cup int there4 sim cong asymp ne equiv le ge sub sup nsub sube supe oplus otimes perp sdot lceil rceil lfloor rfloor lang rang loz spades clubs hearts diams ensp emsp thinsp zwnj zwj lrm rlm ndash mdash lsquo rsquo sbquo ldquo rdquo bdquo dagger Dagger permil lsaquo rsaquo euro').split(' '));
-function isRealEntity(s) {
-  const m = /^&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]*);$/.exec(s);
-  if (!m) return false;
-  const body = m[1];
-  if (body.charCodeAt(0) === 35) return true; // numeric entity
-  return REAL_ENTITIES.has(body);
+// Parse an email domain starting at j (after the '@'), per marked's GFM
+// email regex: first label [A-Za-z0-9_-]+, later labels
+// [A-Za-z0-9_-]*[A-Za-z0-9] (must end with an alphanumeric, so a trailing
+// '_' or '-' is NOT part of the domain). Requires >= 2 labels. Returns the
+// domain end, or -1 if structurally invalid. The caller checks the char
+// after the domain (marked's (?![\w-]) lookahead).
+function parseEmailDomain(text, j) {
+  const n = text.length;
+  let k = j;
+  while (k < n && /[A-Za-z0-9_-]/.test(text[k])) k++;
+  if (k === j) return -1;
+  let labels = 1;
+  while (k < n && text[k] === '.') {
+    let m = k + 1, lastAlnum = -1;
+    while (m < n && /[A-Za-z0-9_-]/.test(text[m])) {
+      if (/[A-Za-z0-9]/.test(text[m])) lastAlnum = m;
+      m++;
+    }
+    if (lastAlnum < 0) break; // no alphanumeric in this label: stop
+    k = lastAlnum + 1;
+    labels++;
+  }
+  if (labels < 2) return -1;
+  return k;
+}
+
+// The most recent '_' delimiter scanned so far can open an emphasis span.
+// Used for the trailing-'_' email rule: marked resolves emphasis first, so
+// a '_' that closes an open '_' span is not part of the email (and does
+// not block it); a '_' with no open span does block it.
+function hasOpenUnderscoreDelim(delims) {
+  for (let k = delims.length - 1; k >= 0; k--) {
+    if (delims[k].ch === '_') return delims[k].canOpen;
+  }
+  return false;
 }
 
 function tryExtendedAutolink(text, i) {
@@ -788,12 +823,13 @@ function tryExtendedAutolink(text, i) {
   else return null;
   const dEnd = parseDomain(text, j);
   if (dEnd < 0) return null;
-  // optional path: any chars except whitespace, '<' and backslash (a
-  // backslash before a newline is a hard break, not part of the URL)
+  // optional path: any chars except whitespace and '<'. A backslash IS
+  // part of the URL (marked's [^\s<]* includes it; it is percent-encoded
+  // as %5C in the href), even before a newline or a space.
   let pEnd = dEnd;
   while (pEnd < n) {
     const c = text.charCodeAt(pEnd);
-    if (c === 32 || c === 9 || c === 10 || c === 13 || c === 60 || c === 92) break;
+    if (c === 32 || c === 9 || c === 10 || c === 13 || c === 60) break;
     pEnd++;
   }
   // trim trailing punctuation; a ')' is trimmed only when unmatched
@@ -810,10 +846,12 @@ function tryExtendedAutolink(text, i) {
       break;
     }
     if (ch === ';') {
+      // Marked's _backpedal drops a trailing '&...;' only when it looks
+      // like an entity ('&' + alphanumerics + ';'); '&page=9;' keeps the
+      // '&page=9' and drops just the ';'. A real entity ('&amp;') is
+      // dropped too — it is not kept.
       const ampIdx = text.lastIndexOf('&', end - 1);
-      if (ampIdx >= dEnd && isRealEntity(text.slice(ampIdx, end))) break;
-      // not a real entity: drop the whole &...; back to the &
-      if (ampIdx >= dEnd) { end = ampIdx; continue; }
+      if (ampIdx >= dEnd && /^&[A-Za-z0-9]+;$/.test(text.slice(ampIdx, end))) { end = ampIdx; continue; }
       end--;
       continue;
     }
@@ -821,10 +859,10 @@ function tryExtendedAutolink(text, i) {
     break;
   }
   const url = text.slice(i, end);
-  return { html: '<a href="' + cleanUrl(scheme + url) + '">' + esc(url) + '</a>', end };
+  return { html: '<a href="' + cleanUrlAuto(scheme + url) + '">' + esc(url) + '</a>', end };
 }
 
-function trySchemeAutolink(text, colonIdx, runStart) {
+function trySchemeAutolink(text, colonIdx, runStart, delims) {
   const n = text.length;
   // look back for the scheme: [A-Za-z][A-Za-z0-9+.-]{1,31}
   let s = colonIdx - 1;
@@ -835,11 +873,10 @@ function trySchemeAutolink(text, colonIdx, runStart) {
   const scheme = text.slice(s, colonIdx);
   if (scheme.length < 2 || scheme.length > 32) return null;
   if (!/^[A-Za-z]/.test(scheme)) return null;
-  // the char before the scheme must allow an autolink
-  if (s > 0) {
-    const p = text[s - 1];
-    if (!(isWhiteCh(p) || p === '*' || p === '_' || p === '~' || p === '(' || p === '<')) return null;
-  }
+  // The char before the scheme must not be alphanumeric (marked's text
+  // rule only stops before a scheme after a non-alnum char); any
+  // punctuation, quote or bracket allows it.
+  if (s > 0 && /[A-Za-z0-9]/.test(text[s - 1])) return null;
   let j = colonIdx + 1;
   if (j >= n || isWhiteCh(text[j])) return null;
   // content: non-space chars, stopping at '<' and backslash (a backslash
@@ -853,18 +890,21 @@ function trySchemeAutolink(text, colonIdx, runStart) {
   if (end === j) return null;
   const lower = scheme.toLowerCase();
   if (lower === 'mailto') {
-    // the content after mailto: must be a valid email
+    // the content after mailto: must be a valid email (marked's narrow
+    // local part [A-Za-z0-9._+-]+ and _-allowing domain)
     const content = text.slice(j, end);
     const atIdx = content.indexOf('@');
     if (atIdx <= 0) return null;
     const local = content.slice(0, atIdx);
-    if (!/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/.test(local)) return null;
-    const dEnd = parseDomain(content, atIdx + 1);
+    if (!/^[A-Za-z0-9._+-]+$/.test(local)) return null;
+    const dEnd = parseEmailDomain(content, atIdx + 1);
     if (dEnd < 0) return null;
-    if (dEnd < content.length && /[A-Za-z0-9_]/.test(content[dEnd])) return null;
+    if (dEnd < content.length && /[A-Za-z0-9_-]/.test(content[dEnd])) {
+      if (content[dEnd] !== '_' || !hasOpenUnderscoreDelim(delims || [])) return null;
+    }
     const emailEnd = j + dEnd;
     const href = scheme + ':' + text.slice(j, emailEnd);
-    return { html: '<a href="' + cleanUrl(href) + '">' + esc(href) + '</a>', end: emailEnd, start: s };
+    return { html: '<a href="' + cleanUrlAuto(href) + '">' + esc(href) + '</a>', end: emailEnd, start: s };
   }
   // general scheme (e.g. xmpp:): the part after the scheme must be a
   // valid user@domain, optionally followed by ONE path segment
@@ -874,10 +914,15 @@ function trySchemeAutolink(text, colonIdx, runStart) {
   const atIdx = content.indexOf('@');
   if (atIdx <= 0) return null;
   const local = content.slice(0, atIdx);
-  if (!/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/.test(local)) return null;
-  const dEnd = parseDomain(content, atIdx + 1);
+  if (!/^[A-Za-z0-9._+-]+$/.test(local)) return null;
+  const dEnd = parseEmailDomain(content, atIdx + 1);
   if (dEnd < 0) return null;
   let e2 = j + dEnd;
+  // The char after the domain must not be a word char or '-' (marked's
+  // (?![\w-])), except a '_' closing an open '_' emphasis span.
+  if (e2 < end && /[A-Za-z0-9_-]/.test(text[e2])) {
+    if (text[e2] !== '_' || !hasOpenUnderscoreDelim(delims || [])) return null;
+  }
   if (e2 < end && text[e2] === '/') {
     // one path segment: up to the next '/', '?', '#', whitespace or '<'
     let p = e2 + 1;
@@ -892,27 +937,33 @@ function trySchemeAutolink(text, colonIdx, runStart) {
   }
   if (e2 === j) return null;
   const href = text.slice(s, e2);
-  return { html: '<a href="' + cleanUrl(href) + '">' + esc(href) + '</a>', end: e2, start: s };
+  return { html: '<a href="' + cleanUrlAuto(href) + '">' + esc(href) + '</a>', end: e2, start: s };
 }
 
-function tryExtendedEmail(text, atIdx, runStart) {
+function tryExtendedEmail(text, atIdx, runStart, delims) {
   const n = text.length;
+  // Marked's GFM bare-email local part is the NARROW [A-Za-z0-9._+-]+
+  // (not the wide CommonMark class): 'a=foo@bar.com' links only
+  // 'foo@bar.com', '{foo@bar.com}' links only 'foo@bar.com'. There is no
+  // pre-char restriction: the email may follow '@', ';', ':', '[', '"',
+  // etc. (marked retries after the first '@' in 'a@b@c.com' and links
+  // 'b@c.com').
   let s = atIdx - 1;
-  while (s >= 0 && /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(text[s])) s--;
+  while (s >= 0 && /[A-Za-z0-9._+-]/.test(text[s])) s--;
   s++;
   if (s === atIdx) return null;
   if (s < runStart) return null; // local part spans a token boundary
-  // the char before the local part must allow an autolink
-  if (s > 0) {
-    const p = text[s - 1];
-    if (!(isWhiteCh(p) || p === '*' || p === '_' || p === '~' || p === '(' || p === '<')) return null;
-  }
-  const dEnd = parseDomain(text, atIdx + 1);
+  const dEnd = parseEmailDomain(text, atIdx + 1);
   if (dEnd < 0) return null;
-  // the char after the domain must not be a word character
-  if (dEnd < n && /[A-Za-z0-9_]/.test(text[dEnd])) return null;
+  // The char after the domain must not be a word char or '-' (marked's
+  // (?![\w-]) lookahead), EXCEPT a '_' that closes an open '_' emphasis
+  // span (marked resolves emphasis first, so that '_' is a delimiter,
+  // not part of the email).
+  if (dEnd < n && /[A-Za-z0-9_-]/.test(text[dEnd])) {
+    if (text[dEnd] !== '_' || !hasOpenUnderscoreDelim(delims || [])) return null;
+  }
   const email = text.slice(s, dEnd);
-  return { html: '<a href="mailto:' + escAttr(email) + '">' + esc(email) + '</a>', end: dEnd, start: s };
+  return { html: '<a href="mailto:' + esc(email) + '">' + esc(email) + '</a>', end: dEnd, start: s };
 }
 
 // ---------- block parsing ----------
