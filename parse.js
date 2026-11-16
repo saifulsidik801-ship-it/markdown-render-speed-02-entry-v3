@@ -933,18 +933,36 @@ function tryExtendedAutolink(text, i) {
     if (c === 32 || c === 9 || c === 10 || c === 13 || c === 60) break;
     pEnd++;
   }
-  // trim trailing punctuation; a ')' is trimmed only when unmatched
+  // A '(' is part of the URL only if a matching ')' closes it before
+  // the next whitespace: truncate at the first '(' left unclosed at
+  // the end (doc-08: '...io)](https://...' ends at ']'; doc-12:
+  // '...)](./docs/create.md)' keeps the balanced pair).
   let end = pEnd;
+  {
+    let depth = 0, firstOpen = -1;
+    for (let k = dEnd; k < pEnd; k++) {
+      const ch = text.charCodeAt(k);
+      if (ch === 40) { if (depth === 0) firstOpen = k; depth++; }
+      else if (ch === 41) { if (depth > 0) depth--; }
+    }
+    if (depth > 0 && firstOpen >= 0) end = firstOpen;
+  }
+  // trim trailing punctuation; a ')' is trimmed only when unmatched
   while (end > dEnd) {
     const ch = text[end - 1];
     if (ch === ')') {
-      let open = 0, close = 0;
+      // The trailing ')' is matched iff scanning the URL with a depth
+      // counter leaves it closing an open '(': an unmatched ')' (e.g.
+      // the one after the domain in '...io)foo(bar)') is kept, and the
+      // ')' that closes '(bar)' is kept too.
+      let depth = 0, matched = false;
       for (let k = i; k < end; k++) {
-        if (text[k] === '(') open++;
-        else if (text[k] === ')') close++;
+        const c2 = text.charCodeAt(k);
+        if (c2 === 40) depth++;
+        else if (c2 === 41) { if (depth > 0) { depth--; if (k === end - 1) matched = true; } }
       }
-      if (close > open) { end--; continue; }
-      break;
+      if (matched) break;
+      end--; continue;
     }
     if (ch === ';') {
       // Marked's _backpedal drops a trailing '&...;' only when it looks
