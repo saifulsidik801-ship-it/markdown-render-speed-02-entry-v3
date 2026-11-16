@@ -919,6 +919,37 @@ function tryExtendedEmail(text, atIdx, runStart) {
 function parse(md) {
   const src = md.replace(/\r\n?/g, '\n');
   const links = new Map();
+  // Pre-collect link reference definitions so a link can use a definition
+  // that appears later in the document (forward reference, doc-05/12).
+  // Only lines at a block boundary count (first line, after a blank line,
+  // or after another definition); a '[label]:' line inside a paragraph
+  // is literal text, not a definition (cm-213). Fenced code is skipped.
+  {
+    const ls = src.split('\n');
+    let inFence = null;
+    let boundary = true;
+    for (let k = 0; k < ls.length; k++) {
+      const l = ls[k];
+      if (inFence) {
+        if (matchFenceClose(l, inFence.ch, inFence.len)) inFence = null;
+        boundary = false;
+        continue;
+      }
+      const f = matchFence(l);
+      if (f) { inFence = f; boundary = false; continue; }
+      if (isBlank(l)) { boundary = true; continue; }
+      if (boundary) {
+        const def = tryLinkRefDef(ls, k);
+        if (def) {
+          if (!links.has(normLabel(def.label))) links.set(normLabel(def.label), { href: def.href, title: def.title });
+          k = def.end - 1;
+          boundary = true;
+          continue;
+        }
+      }
+      boundary = false;
+    }
+  }
   const inner = parseBlocksInner(src, links);
   return renderBlocks(inner.blocks, links);
 }
