@@ -1379,6 +1379,11 @@ function parseQuote(lines, i, links) {
         c = prefix + raw;
       }
       if (own) prefix = own;
+      // A whitespace-only remainder is paragraph content (cm-241: '>  '
+      // contributes a ' ' line to the paragraph), not a blank line — but
+      // only when a paragraph is already open (cm-240: with no paragraph,
+      // '>  ' leaves the quote empty).
+      if (inPara && c !== '' && /^[ \t]+$/.test(c)) c = '\x00' + c;
       content.push(c);
       inPara = tr.feed(c);
       i++;
