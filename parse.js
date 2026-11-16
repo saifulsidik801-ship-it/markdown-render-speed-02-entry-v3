@@ -1692,8 +1692,12 @@ function parseQuote(lines, i, links) {
     // is a top-level paragraph, not fence content).
     if (!inPara && !prefix) break;
     if (isBlockStartThatInterrupts(line, true)) break;
-    // A lazy continuation line loses its leading whitespace (cm-238).
-    let c = line.replace(/^[ \t]+/, '');
+    // A lazy continuation line keeps its leading whitespace, except
+    // that an indent of 4+ columns loses exactly 4 (same rule as list
+    // lazy lines: cm-238 strips 4, doc-17 keeps 1 space).
+    let c = line;
+    const lc0 = line.charCodeAt(0);
+    if ((lc0 === 32 || lc0 === 9) && indentOf(line) >= 4) c = stripCols(line, 4);
     // A setext underline as a lazy line is paragraph text, not an
     // underline: indent it so it cannot form a heading (cm-093).
     if (matchSetext(c)) c = '    ' + c;
