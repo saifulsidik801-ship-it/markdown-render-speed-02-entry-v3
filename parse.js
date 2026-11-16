@@ -1099,10 +1099,11 @@ function matchListItem(line) {
     let contentIndent, content;
     if (k >= line.length) { contentIndent = ind + 2; content = ''; }
     else if (cols >= 5) {
-      // only 1 column of whitespace is consumed
+      // only 1 column of whitespace is consumed; the rest of the run
+      // expands to spaces with correct column tracking (cm-007:
+      // '-\t\tfoo' leaves 6 columns, i.e. indented code '  foo').
       contentIndent = ind + 2;
-      if (line[j + 1] === '\t') content = ' '.repeat(4 - ((ind + 1) % 4) - 1) + line.slice(j + 2);
-      else content = line.slice(j + 2);
+      content = ' '.repeat(cols - 1) + line.slice(k);
     }
     else { contentIndent = ind + 1 + cols; content = line.slice(k); }
     return { indent: ind, type: 'ul', delim: c, start: null, contentIndent, content };
@@ -1127,13 +1128,38 @@ function matchListItem(line) {
     if (m >= line.length) { contentIndent = ind + markerWidth + 1; content = ''; }
     else if (cols >= 5) {
       contentIndent = ind + markerWidth + 1;
-      if (line[k + 1] === '\t') content = ' '.repeat(4 - ((ind + markerWidth) % 4) - 1) + line.slice(k + 2);
-      else content = line.slice(k + 2);
+      content = ' '.repeat(cols - 1) + line.slice(m);
     }
     else { contentIndent = ind + markerWidth + cols; content = line.slice(m); }
     return { indent: ind, type: 'ol', delim: d, start, contentIndent, content };
   }
   return null;
+}
+
+// Strip one blockquote marker and return the content line. Unlike
+// matchQuoteMarker (index-based), this expands tabs with correct column
+// tracking: the whitespace run after '>' is expanded to spaces and one
+// column is consumed (cm-006: '>\t\tfoo' leaves 6 columns of indent,
+// i.e. indented code with '  foo'). A tab that is content (after a
+// space was consumed) is left alone — only the run right after the
+// marker is expanded.
+function stripQuoteMarker(line) {
+  let i = 0, col = 0;
+  while (i < line.length && col < 4) {
+    if (line.charCodeAt(i) === 32) { col++; i++; }
+    else if (line.charCodeAt(i) === 9) { col += 4 - (col % 4); i++; }
+    else break;
+  }
+  if (col >= 4) return null;
+  if (i >= line.length || line[i] !== '>') return null;
+  i++; col++;
+  let runCols = 0, j = i;
+  while (j < line.length && (line[j] === ' ' || line[j] === '\t')) {
+    runCols += line[j] === '\t' ? 4 - ((col + runCols) % 4) : 1;
+    j++;
+  }
+  if (runCols === 0) return line.slice(i);
+  return ' '.repeat(runCols - 1) + line.slice(j);
 }
 
 // Index just after a blockquote marker ('>' plus one following space/tab),
@@ -1350,21 +1376,39 @@ function parseHtmlBlock(lines, i, nested = false) {
 // Tracks whether content lines are inside a fenced code block or a type 1-5
 // HTML block, so a lazy continuation line is only allowed after a real
 // paragraph line. feed(line) returns whether a lazy line may follow it.
+// inCode() reports whether a fence/HTML block is currently open.
+// codeStarted() reports whether an indented content line has been seen
+// inside the open fence/HTML block: marked only keeps a sub-indent line
+// in a list item's fence after such a line (doc-02/05/06: an indented
+// line first; A4: an indent-0 first content line escapes). isCodeClose()
+// reports whether a line closes the open fence/HTML block — a closing
+// fence below the item indent ends the list instead of being collected
+// (B2/C5: the closing ``` becomes a top-level fence).
 function makeCtxTracker() {
   let fence = null;
   let htmlEnd = null;
+  let started = false;
   return {
+    inCode() { return fence !== null || htmlEnd !== null; },
+    codeStarted() { return started; },
+    isCodeClose(c) {
+      if (fence) return matchFenceClose(c, fence.ch, fence.len);
+      if (htmlEnd) return htmlEnd.test(c);
+      return false;
+    },
     feed(c) {
       if (fence) {
-        if (matchFenceClose(c, fence.ch, fence.len)) fence = null;
+        if (matchFenceClose(c, fence.ch, fence.len)) { fence = null; started = false; }
+        else started = true;
         return false;
       }
       if (htmlEnd) {
-        if (htmlEnd.test(c)) htmlEnd = null;
+        if (htmlEnd.test(c)) { htmlEnd = null; started = false; }
+        else started = true;
         return false;
       }
       const f = matchFence(c);
-      if (f) { fence = { ch: f.ch, len: f.len }; return false; }
+      if (f) { fence = { ch: f.ch, len: f.len }; started = false; return false; }
       // An indented-code line is not a paragraph line: no lazy continuation.
       if (indentOf(c) >= 4) return false;
       const hb = matchHtmlBlock(c);
@@ -1405,24 +1449,33 @@ function parseQuote(lines, i, links) {
   let prefix = '';
   while (i < n) {
     const line = lines[i];
-    const qm = matchQuoteMarker(line);
-    if (qm >= 0) {
-      const raw = line.slice(qm);
+    // stripQuoteMarker returns null when the line is not a quote line
+    // (same test as matchQuoteMarker, but it also yields the content
+    // with correct tab expansion — one scan instead of two).
+    const raw = stripQuoteMarker(line);
+    if (raw !== null) {
       const own = quotePrefix(raw);
       let c = raw;
       // Plain text after the marker, while a nested paragraph is open,
       // is a lazy continuation of that paragraph: keep it at the nested
       // depth instead of dropping it to this level. (A plain-text line
       // with no blank line before it cannot start a new outer paragraph.)
-      if (prefix && !own && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
+      // Inside a fenced code block there is no paragraph: a fence line
+      // stays literal (doc-10/12/14: '> function...' keeps no '>').
+      if (!tr.inCode() && prefix && !own && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
         c = prefix + raw;
       }
       if (own) prefix = own;
       // A whitespace-only remainder is paragraph content (cm-241: '>  '
-      // contributes a ' ' line to the paragraph), not a blank line — but
-      // only when a paragraph is already open (cm-240: with no paragraph,
-      // '>  ' leaves the quote empty).
-      if (inPara && c !== '' && /^[ \t]+$/.test(c)) c = '\x00' + c;
+      // contributes a ' ' line to the paragraph) only when it is the
+      // last line of the quote; mid-quote it is a blank line that
+      // breaks the paragraph. (A tab remainder expands to spaces here,
+      // e.g. '>\t' contributes '  ' when trailing.)
+      if (inPara && c !== '' && /^[ \t]+$/.test(c)) {
+        const nxt = lines[i + 1];
+        const trailing = nxt === undefined || isBlank(nxt) || (matchQuoteMarker(nxt) < 0 && !prefix);
+        c = trailing ? '\x00' + c : '';
+      }
       content.push(c);
       inPara = tr.feed(c);
       i++;
@@ -1431,7 +1484,9 @@ function parseQuote(lines, i, links) {
     if (isBlank(line)) break;
     // A lazy line is allowed when a paragraph is open here, or when a
     // nested quote holds one (cm-250: 'bar' after '> > > foo' continues
-    // the innermost paragraph).
+    // the innermost paragraph). A line without a '>' marker never joins
+    // a fenced code block inside a quote (cm-237: 'foo' after '> ```'
+    // is a top-level paragraph, not fence content).
     if (!inPara && !prefix) break;
     if (isBlockStartThatInterrupts(line, true)) break;
     // A lazy continuation line loses its leading whitespace (cm-238).
@@ -1500,6 +1555,19 @@ function parseList(lines, i, links) {
         i++;
         continue;
       }
+      // Inside a fenced code block or HTML block, a sub-indent content
+      // line belongs to the item only once an indented content line has
+      // been seen in that fence (codeStarted) and only if the line is
+      // not the fence's closing line (doc-02/05/06 vs A4/B2/C5).
+      if (tr.inCode() && tr.codeStarted() && !tr.isCodeClose(line)) {
+        for (let k = 0; k < pendingBlank; k++) cur.lines.push('');
+        pendingBlank = 0;
+        const c = stripCols(line, cur.contentIndent);
+        cur.lines.push(c);
+        inPara = tr.feed(c);
+        i++;
+        continue;
+      }
       // a list item marker of a different type/delimiter ends this list
       if (m) { i -= pendingBlank; break; }
       if (inPara && pendingBlank === 0 && !isBlockStartThatInterrupts(line, true)) {
@@ -1555,10 +1623,11 @@ function parseBlocksInner(src, links, nested = false) {
   while (i < n) {
     const line = lines[i];
     if (isBlank(line)) {
-      // A whitespace-only (but non-empty) line inside a table paragraph
-      // is an empty table row, not a paragraph break (doc-26: a '\t' line
-      // becomes a row of empty cells). A truly empty line still breaks.
-      if (para && para.length >= 2 && line !== '' && isTablePara(para)) {
+      // A whitespace-only line inside a table paragraph is an empty table
+      // row, not a paragraph break — but ONLY when it contains a tab
+      // (doc-26: a '\t' line becomes a row of empty cells). A
+      // spaces-only line is a blank line and ends the table (doc-03).
+      if (para && para.length >= 2 && line !== '' && line.includes('\t') && isTablePara(para)) {
         para.push('');
         i++;
         continue;
@@ -1624,7 +1693,10 @@ function parseBlocksInner(src, links, nested = false) {
       while (i < n) {
         const l = lines[i];
         if (matchFenceClose(l, fence.ch, fence.len)) { i++; closed = true; break; }
-        codeLines.push(stripCols(l, fence.indent, true));
+        // Backtick fences strip up to the opening fence's indent from
+        // each content line; tilde fences strip nothing (marked's
+        // indent compensation only matches backticks).
+        codeLines.push(fence.ch === '`' ? stripCols(l, fence.indent, true) : l);
         i++;
       }
       // Pop at most one trailing blank line: the artifact of a final
