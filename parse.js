@@ -1651,6 +1651,12 @@ function parseQuote(lines, i, links) {
         c = prefix + raw;
       }
       if (own) prefix = own;
+      // A blank remainder ends the paragraph and the nested-quote
+      // context: subsequent lines start fresh at this level (doc-02:
+      // after a blank '>' line, '> Invalid...' continues the outer
+      // '[!WARNING]' paragraph instead of re-entering the nested quote
+      // via the stale prefix).
+      if (isBlank(raw)) prefix = '';
       // A whitespace-only remainder is paragraph content (cm-241: '>  '
       // contributes a ' ' line to the paragraph) only when it is the
       // last line of the quote; mid-quote it is a blank line that
