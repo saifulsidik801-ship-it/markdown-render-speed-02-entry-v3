@@ -673,16 +673,21 @@ function processEmphasis(nodes, delims) {
   let ci = 0;
   while (ci < delims.length) {
     const closer = delims[ci];
-    if (!closer.canClose || closer.len === 0) { ci++; continue; }
+    if (!closer.canClose || closer.len === 0 || closer.dead) { ci++; continue; }
     let matched = false;
     for (let oi = ci - 1; oi >= 0; oi--) {
       const opener = delims[oi];
-      if (opener.len === 0 || opener.ch !== closer.ch || !opener.canOpen) continue;
+      if (opener.len === 0 || opener.dead || opener.ch !== closer.ch || !opener.canOpen) continue;
       // Rule of 3: skip when the sum is a multiple of 3, unless BOTH
       // lengths are multiples of 3 (cm-416: '***bar***' matches).
       if ((opener.canClose || closer.canOpen) && ((opener.len + closer.len) % 3 === 0) && (opener.len % 3 !== 0 || closer.len % 3 !== 0)) continue;
       const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
       wrapEmphasis(nodes, opener, closer, use);
+      // Delimiters strictly between the opener and closer are now inside
+      // the emphasis and can no longer match (cm-469: the '_' in '_bar'
+      // inside '*foo _bar*' must stay literal). Mark them dead (their
+      // literal characters still render).
+      for (let k = oi + 1; k < ci; k++) delims[k].dead = true;
       matched = true;
       break;
     }
@@ -1363,6 +1368,9 @@ function parseQuote(lines, i, links) {
     // A setext underline as a lazy line is paragraph text, not an
     // underline: indent it so it cannot form a heading (cm-093).
     if (matchSetext(c)) c = '    ' + c;
+    // A lazy line that looks like a list item stays paragraph text
+    // (cm-238: '- bar' under 'foo' is text, not a nested list).
+    if (matchListItem(c)) c = '\x00' + c;
     content.push(c);
     inPara = tr.feed(c);
     i++;
@@ -1385,8 +1393,10 @@ function parseList(lines, i, links) {
   while (i < n) {
     const line = lines[i];
     if (isBlank(line)) { pendingBlank++; inPara = false; i++; continue; }
-    // A thematic break ends the list (cm-060).
-    if (cur && matchHr(line)) { i -= pendingBlank; break; }
+    // A thematic break ends the list (cm-060) — but only if it is not
+    // indented content of the current item (cm-300: '  ---' under '- Bar'
+    // is a setext underline, not a break).
+    if (cur && matchHr(line) && indentOf(line) < cur.contentIndent) { i -= pendingBlank; break; }
     const m = matchListItem(line);
     if (m && m.type === listType && m.delim === listDelim && m.indent < (cur ? cur.contentIndent : Infinity)) {
       if (cur) {
