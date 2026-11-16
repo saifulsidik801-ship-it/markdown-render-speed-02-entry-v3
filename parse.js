@@ -949,10 +949,12 @@ function tryExtendedEmail(text, atIdx, runStart, delims) {
   // etc. (marked retries after the first '@' in 'a@b@c.com' and links
   // 'b@c.com').
   let s = atIdx - 1;
-  while (s >= 0 && /[A-Za-z0-9._+-]/.test(text[s])) s--;
+  // The local part must not cross the start of the current text run: a
+  // '_' before runStart is an emphasis delimiter, not part of the local
+  // part ('_foo@bar.com' links 'foo@bar.com', the '_' opens the em).
+  while (s >= runStart && /[A-Za-z0-9._+-]/.test(text[s])) s--;
   s++;
   if (s === atIdx) return null;
-  if (s < runStart) return null; // local part spans a token boundary
   const dEnd = parseEmailDomain(text, atIdx + 1);
   if (dEnd < 0) return null;
   // The char after the domain must not be a word char or '-' (marked's
