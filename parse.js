@@ -1494,9 +1494,12 @@ function parseHtmlBlock(lines, i, nested = false) {
   const out = [first];
   if (endRe && endRe.test(first)) {
     // end condition on the first line (types 1-5): trailing \n iff the
-    // next line is non-blank, or is the trailing '' of a final newline
+    // next line is non-blank, or is the trailing '' of a final newline.
+    // A whitespace-only line (' ', '\t') counts as content here, not
+    // as a blank line (doc-15: '-->' + '\t' keeps the '\n'); only a
+    // truly empty '' line suppresses it.
     let text = first;
-    if (i + 1 < n && (!isBlank(lines[i + 1]) || i + 1 === n - 1)) text += '\n';
+    if (i + 1 < n && (lines[i + 1] !== '' || i + 1 === n - 1)) text += '\n';
     return { block: { t: 'html', text }, next: i + 1 };
   }
   i++;
@@ -1520,8 +1523,10 @@ function parseHtmlBlock(lines, i, nested = false) {
   if (!text.endsWith('\n')) {
     if (endRe) {
       // types 1-5: trailing \n iff the next line is non-blank, or is the
-      // trailing '' of a final newline (a real blank line after means none)
-      if (i < n && (!isBlank(lines[i]) || i === n - 1)) text += '\n';
+      // trailing '' of a final newline (a real blank line after means
+      // none). A whitespace-only line counts as content, not blank
+      // (doc-15: '-->' + '\t' keeps the '\n'); only '' suppresses it.
+      if (i < n && (lines[i] !== '' || i === n - 1)) text += '\n';
     } else if (!nested && i < n && i === n - 1 && isBlank(lines[i])) {
       text += '\n';
     }
