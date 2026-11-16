@@ -1643,8 +1643,11 @@ function parseQuote(lines, i, links) {
       // A blank remainder is NOT a lazy continuation: it stays blank so
       // it separates blocks (doc-33: a '>' line between two inner
       // quotes ends the first inner quote; prepending the prefix turned
-      // it into a '> ' quote line that kept the quote open).
-      if (!tr.inCode() && prefix && !own && !isBlank(raw) && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
+      // it into a '> ' quote line that kept the quote open). And the
+      // continuation needs a paragraph actually open (inPara): after a
+      // blank line ends the nested paragraph, a '> Are...' line starts
+      // a new paragraph at this level, not a nested quote (doc-38).
+      if (inPara && !tr.inCode() && prefix && !own && !isBlank(raw) && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
         c = prefix + raw;
       }
       if (own) prefix = own;
