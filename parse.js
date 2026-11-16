@@ -1588,10 +1588,17 @@ function paraOpen(c) {
 // (B2/C5: the closing ``` becomes a top-level fence).
 function makeCtxTracker() {
   let fence = null;
+  let fenceNested = false;
   let htmlEnd = null;
   let started = false;
   return {
     inCode() { return fence !== null || htmlEnd !== null; },
+    // True only when a fence is open that was opened by a line at this
+    // level (no nested '>' prefix): a fence opened inside a nested
+    // quote does not block a lazy line at this level (doc-21: the
+    // '> > ```rust' fence must not end the outer quote for 'fast npm
+    // more'; doc-35: a '```text' fence at this level does end it).
+    inFenceLevel() { return fence !== null && !fenceNested; },
     codeStarted() { return started; },
     isCodeClose(c) {
       if (fence) return matchFenceClose(c, fence.ch, fence.len);
@@ -1607,7 +1614,7 @@ function makeCtxTracker() {
       // the original line (it handles markers itself).
       const s = c.slice(quotePrefix(c).length);
       if (fence) {
-        if (matchFenceClose(s, fence.ch, fence.len)) { fence = null; started = false; }
+        if (matchFenceClose(s, fence.ch, fence.len)) { fence = null; fenceNested = false; started = false; }
         else started = true;
         return false;
       }
@@ -1617,7 +1624,7 @@ function makeCtxTracker() {
         return false;
       }
       const f = matchFence(s);
-      if (f) { fence = { ch: f.ch, len: f.len }; started = false; return false; }
+      if (f) { fence = { ch: f.ch, len: f.len }; fenceNested = quotePrefix(c).length > 0; started = false; return false; }
       const hb = matchHtmlBlock(c);
       if (hb && hb.type !== 6 && hb.type !== 7) {
         let name = null;
@@ -1655,6 +1662,12 @@ function parseQuote(lines, i, links) {
   // The '>' prefix of the deepest open quote (cm-250/251: a plain-text
   // line following a nested quote line stays at that nested depth).
   let prefix = '';
+  // Indent (columns) of the last line added to the quote's content: a
+  // lazy line is stripped by 4 only when it sits 4+ columns deeper
+  // than that line (q5: '>' content at 0, 5-space lazy strips 4; q6:
+  // a 3-space lazy line precedes, so a 5-space line is only 2 deeper
+  // and keeps all 5). A '>' line contributes indent 0 (its content).
+  let prevInd = 0;
   while (i < n) {
     const line = lines[i];
     // stripQuoteMarker returns null when the line is not a quote line
@@ -1698,6 +1711,7 @@ function parseQuote(lines, i, links) {
         c = trailing ? '\x00' + c : '';
       }
       content.push(c);
+      prevInd = indentOf(c);
       inPara = tr.feed(c);
       i++;
       continue;
@@ -1706,16 +1720,22 @@ function parseQuote(lines, i, links) {
     // A lazy line is allowed when a paragraph is open here, or when a
     // nested quote holds one (cm-250: 'bar' after '> > > foo' continues
     // the innermost paragraph). A line without a '>' marker never joins
-    // a fenced code block inside a quote (cm-237: 'foo' after '> ```'
-    // is a top-level paragraph, not fence content).
+    // a fenced code block inside a quote (cm-237 / doc-35: 'fn main()'
+    // after '> "key"...' ends the quote instead of joining the fence)
+    // — but only when the fence was opened at this level (doc-21).
+    if (tr.inFenceLevel()) break;
     if (!inPara && !prefix) break;
     if (isBlockStartThatInterrupts(line, true)) break;
     // A lazy continuation line keeps its leading whitespace, except
-    // that an indent of 4+ columns loses exactly 4 (same rule as list
-    // lazy lines: cm-238 strips 4, doc-17 keeps 1 space).
+    // that it loses 4 columns when it sits 4+ columns deeper than the
+    // previous content line (cm-238 strips 4; doc-17 keeps 1; q6 keeps
+    // 5 because a 3-space lazy line precedes it).
     let c = line;
     const lc0 = line.charCodeAt(0);
-    if ((lc0 === 32 || lc0 === 9) && indentOf(line) >= 4) c = stripCols(line, 4);
+    if (lc0 === 32 || lc0 === 9) {
+      const ind = indentOf(line);
+      if (ind - prevInd >= 4) c = stripCols(line, 4);
+    }
     // A setext underline as a lazy line is paragraph text, not an
     // underline: indent it so it cannot form a heading (cm-093).
     if (matchSetext(c)) c = '    ' + c;
@@ -1727,7 +1747,14 @@ function parseQuote(lines, i, links) {
       c = prefix + c;
     }
     content.push(c);
-    inPara = tr.feed(c);
+    prevInd = indentOf(c);
+    tr.feed(c);
+    // A lazy line continues the open paragraph: paraOpen would call an
+    // indented (4+) lazy line "indented code" and close the paragraph,
+    // but inside a quote it is a continuation (q6: the 5-space "key"
+    // line must not end the quote before 'create'). Keep inPara true
+    // unless a fence/HTML block is open.
+    if (!tr.inCode()) inPara = true;
     i++;
   }
   const inner = parseBlocksInner(content.join('\n'), links, true);
