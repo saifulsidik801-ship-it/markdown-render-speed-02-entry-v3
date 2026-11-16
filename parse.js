@@ -140,6 +140,15 @@ function hasUnescapedBracket(s) {
 
 function isDelimChar(c) { return c === 42 || c === 95 || c === 126; }
 
+// Document-level "inside an <a> tag" state (marked's lexer.state.inLink).
+// An <a> start tag encountered while inline-lexing sets it; a </a> tag
+// clears it. It persists across paragraphs for the whole document, and
+// while set, bare GFM autolinks (www/https URLs, scheme autolinks, bare
+// emails) are plain text. A single-line <a> tag alone on a line is an
+// HTML block (never inline-lexed), so it does NOT set this; a multi-line
+// <a> tag is a paragraph and DOES. Reset at the start of parse().
+let inLinkDoc = false;
+
 // Can this delimiter run open / close? (CommonMark flanking rules.)
 function flanking(text, i, j) {
   // run is text[i..j), char before is text[i-1], after is text[j]
@@ -257,10 +266,22 @@ function inlineParse(text, links, inLink) {
     }
     if (c === LANGLE) {
       let res = tryAutolink(text, i);
-      if (!res) res = tryAngle(text, i, links);
       if (res) {
         flushText(i);
         nodes.push(res.html);
+        i = res.end; runStart = i; continue;
+      }
+      res = tryAngle(text, i, links);
+      if (res) {
+        flushText(i);
+        nodes.push(res.html);
+        // An <a> start tag sets the document inLink state, a </a> tag
+        // clears it (marked's tag tokenizer). Only real tags count, not
+        // <...> autolinks (handled above). The tests are marked's exact
+        // regexes: startATag /^<a /i (a literal space, not any
+        // whitespace) and endATag /^<\/a>/i.
+        if (/^<a /i.test(res.html)) inLinkDoc = true;
+        else if (/^<\/a>/i.test(res.html)) inLinkDoc = false;
         i = res.end; runStart = i; continue;
       }
       i++; continue; // literal '<' stays in run
@@ -298,8 +319,9 @@ function inlineParse(text, links, inLink) {
     }
     if (c === 119 || c === 104 || c === 87 || c === 72) { // w / h / W / H: extended autolink
       // GFM bare autolinks are plain text inside link text (marked: a
-      // bare URL in a link's text is not linked).
-      if (!inLink && (i === 0 || isWhiteCh(text[i - 1]) || text[i - 1] === '*' || text[i - 1] === '_' || text[i - 1] === '~' || text[i - 1] === '(' || text[i - 1] === '<')) {
+      // bare URL in a link's text is not linked), and inside an <a> tag
+      // (document inLink state).
+      if (!inLink && !inLinkDoc && (i === 0 || isWhiteCh(text[i - 1]) || text[i - 1] === '*' || text[i - 1] === '_' || text[i - 1] === '~' || text[i - 1] === '(' || text[i - 1] === '<')) {
         const res = tryExtendedAutolink(text, i);
         if (res) {
           flushText(i);
@@ -310,7 +332,7 @@ function inlineParse(text, links, inLink) {
       i++; continue;
     }
     if (c === 58) { // ':': scheme autolink (mailto:, xmpp:, ...)
-      if (!inLink) {
+      if (!inLink && !inLinkDoc) {
         const res = trySchemeAutolink(text, i, runStart, delims);
         if (res) {
           flushText(res.start);
@@ -321,7 +343,7 @@ function inlineParse(text, links, inLink) {
       i++; continue;
     }
     if (c === AMP2) { // @: extended email autolink
-      if (!inLink) {
+      if (!inLink && !inLinkDoc) {
         const res = tryExtendedEmail(text, i, runStart, delims);
         if (res) {
           flushText(res.start);
@@ -970,6 +992,7 @@ function tryExtendedEmail(text, atIdx, runStart, delims) {
 
 // ---------- block parsing ----------
 function parse(md) {
+  inLinkDoc = false;
   const src = md.replace(/\r\n?/g, '\n');
   const links = new Map();
   // Pre-collect link reference definitions so a link can use a definition
