@@ -161,7 +161,10 @@ function inlineParse(text, links, inLink) {
         if (d === LF) { // backslash newline = hard break
           flushText(i);
           nodes.push('<br>');
-          i += 2; runStart = i; continue;
+          i += 2;
+          // leading spaces/tabs on the next line are stripped (cm-637)
+          while (i < n && (text.charCodeAt(i) === SPACE || text.charCodeAt(i) === TAB)) i++;
+          runStart = i; continue;
         }
         if (d < 128 && ASCII_PUNCT.test(text[i + 1])) {
           // escaped punctuation: emit the literal char (backslash excluded)
@@ -277,7 +280,10 @@ function inlineParse(text, links, inLink) {
       if (sp >= 2) {
         flushText(i - sp);
         nodes.push('<br>');
-        i++; runStart = i; continue;
+        i++;
+        // leading spaces/tabs on the next line are stripped (cm-636)
+        while (i < n && (text.charCodeAt(i) === SPACE || text.charCodeAt(i) === TAB)) i++;
+        runStart = i; continue;
       }
       i++; continue; // soft break: newline stays in run
     }
@@ -851,28 +857,29 @@ function trySchemeAutolink(text, colonIdx, runStart) {
     const href = scheme + ':' + text.slice(j, emailEnd);
     return { html: '<a href="' + cleanUrl(href) + '">' + esc(href) + '</a>', end: emailEnd, start: s };
   }
-  // general scheme: trim trailing punctuation like the www autolink
-  let e2 = end;
-  while (e2 > j) {
-    const ch = text[e2 - 1];
-    if (ch === ')') {
-      let open = 0, close = 0;
-      for (let k = s; k < e2; k++) {
-        if (text[k] === '(') open++;
-        else if (text[k] === ')') close++;
-      }
-      if (close > open) { e2--; continue; }
-      break;
+  // general scheme (e.g. xmpp:): the part after the scheme must be a
+  // valid user@domain, optionally followed by ONE path segment
+  // (gfm-635: 'xmpp:foo@bar.baz/txt/bin' links only '/txt'; no query or
+  // fragment, and no second segment). A bare 'foo:bar' is not a link.
+  const content = text.slice(j, end);
+  const atIdx = content.indexOf('@');
+  if (atIdx <= 0) return null;
+  const local = content.slice(0, atIdx);
+  if (!/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/.test(local)) return null;
+  const dEnd = parseDomain(content, atIdx + 1);
+  if (dEnd < 0) return null;
+  let e2 = j + dEnd;
+  if (e2 < end && text[e2] === '/') {
+    // one path segment: up to the next '/', '?', '#', whitespace or '<'
+    let p = e2 + 1;
+    while (p < end) {
+      const ch = text.charCodeAt(p);
+      if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 60 || ch === 63 || ch === 35 || ch === 47) break;
+      p++;
     }
-    if (ch === ';') {
-      const ampIdx = text.lastIndexOf('&', e2 - 1);
-      if (ampIdx >= j && isRealEntity(text.slice(ampIdx, e2))) break;
-      if (ampIdx >= j) { e2 = ampIdx; continue; }
-      e2--;
-      continue;
-    }
-    if (/[?!.,:*_~]/.test(ch)) { e2--; continue; }
-    break;
+    // trim trailing punctuation from the segment
+    while (p > e2 + 1 && /[?!.,:*_~]/.test(text[p - 1])) p--;
+    if (p > e2 + 1) e2 = p;
   }
   if (e2 === j) return null;
   const href = text.slice(s, e2);
@@ -1416,7 +1423,10 @@ function parseList(lines, i, links) {
         // A lazy continuation line loses leading whitespace up to the
         // item's content indent (cm-291/312).
         const c = stripCols(line, cur.contentIndent);
-        cur.lines.push(c);
+        // If the stripped line looks like a list item, it must stay
+        // paragraph text (cm-312: '- e' under 'd' is text, not a nested
+        // list). Mark it so parseBlocksInner does not re-parse it as one.
+        cur.lines.push(matchListItem(c) ? '\x00' + c : c);
         inPara = tr.feed(c);
         i++;
         continue;
@@ -1462,6 +1472,14 @@ function parseBlocksInner(src, links, nested = false) {
     if (isBlank(line)) {
       flushPara();
       if (blocks.length > 0) pendingBlank = true;
+      i++;
+      continue;
+    }
+    // A '\x00'-prefixed line is a lazy continuation that looks like a
+    // list item (cm-312): it is paragraph text, never a block start.
+    if (line.charCodeAt(0) === 0) {
+      if (!para) para = [];
+      para.push(line.slice(1));
       i++;
       continue;
     }
