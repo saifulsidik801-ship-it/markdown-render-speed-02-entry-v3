@@ -287,7 +287,7 @@ function inlineParse(text, links, inLink) {
       }
       i++; continue; // soft break: newline stays in run
     }
-    if (c === 119 || c === 104) { // w / h: extended autolink
+    if (c === 119 || c === 104 || c === 87 || c === 72) { // w / h / W / H: extended autolink
       // GFM bare autolinks are plain text inside link text (marked: a
       // bare URL in a link's text is not linked).
       if (!inLink && (i === 0 || isWhiteCh(text[i - 1]) || text[i - 1] === '*' || text[i - 1] === '_' || text[i - 1] === '~' || text[i - 1] === '(' || text[i - 1] === '<')) {
@@ -778,9 +778,13 @@ function isRealEntity(s) {
 function tryExtendedAutolink(text, i) {
   const n = text.length;
   let j, scheme;
+  // The scheme (http/https) is case-insensitive (GFM), but 'www.' is
+  // lowercase-only (doc-09: 'Www.atlas.com' is plain text). The original
+  // case is preserved in the href.
+  const low = text.slice(i, i + 8).toLowerCase();
   if (text.startsWith('www.', i)) { j = i + 4; scheme = 'http://'; }
-  else if (text.startsWith('https://', i)) { j = i + 8; scheme = ''; }
-  else if (text.startsWith('http://', i)) { j = i + 7; scheme = ''; }
+  else if (low.startsWith('https://')) { j = i + 8; scheme = ''; }
+  else if (low.startsWith('http://')) { j = i + 7; scheme = ''; }
   else return null;
   const dEnd = parseDomain(text, j);
   if (dEnd < 0) return null;
