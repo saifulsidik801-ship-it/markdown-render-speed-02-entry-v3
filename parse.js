@@ -1576,8 +1576,15 @@ function makeCtxTracker() {
       return false;
     },
     feed(c) {
+      // A fence may hide inside nested quote markers ('> > ```json'):
+      // strip leading '>' markers so the nested fence is seen (doc-06:
+      // without this the outer tracker never opens the fence, and a
+      // lazy '> npm install...' line is wrongly prepended with the
+      // nested prefix and absorbed into the fence). paraOpen still gets
+      // the original line (it handles markers itself).
+      const s = c.slice(quotePrefix(c).length);
       if (fence) {
-        if (matchFenceClose(c, fence.ch, fence.len)) { fence = null; started = false; }
+        if (matchFenceClose(s, fence.ch, fence.len)) { fence = null; started = false; }
         else started = true;
         return false;
       }
@@ -1586,7 +1593,7 @@ function makeCtxTracker() {
         else started = true;
         return false;
       }
-      const f = matchFence(c);
+      const f = matchFence(s);
       if (f) { fence = { ch: f.ch, len: f.len }; started = false; return false; }
       const hb = matchHtmlBlock(c);
       if (hb && hb.type !== 6 && hb.type !== 7) {
