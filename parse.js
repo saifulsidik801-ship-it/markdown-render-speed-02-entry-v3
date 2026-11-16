@@ -1345,23 +1345,50 @@ function makeCtxTracker() {
   };
 }
 
+function quotePrefix(s) {
+  // Leading run of '>' markers (each '>' + at most one space/tab).
+  let p = '', i = 0;
+  while (i < s.length && s[i] === '>') {
+    p += '>';
+    i++;
+    if (i < s.length && (s[i] === ' ' || s[i] === '\t')) { p += s[i]; i++; }
+  }
+  return p;
+}
+
 function parseQuote(lines, i, links) {
   const content = [];
   const n = lines.length;
   const tr = makeCtxTracker();
   let inPara = false;
+  // The '>' prefix of the deepest open quote (cm-250/251: a plain-text
+  // line following a nested quote line stays at that nested depth).
+  let prefix = '';
   while (i < n) {
     const line = lines[i];
     const qm = matchQuoteMarker(line);
     if (qm >= 0) {
-      const c = line.slice(qm);
+      const raw = line.slice(qm);
+      const own = quotePrefix(raw);
+      let c = raw;
+      // Plain text after the marker, while a nested paragraph is open,
+      // is a lazy continuation of that paragraph: keep it at the nested
+      // depth instead of dropping it to this level. (A plain-text line
+      // with no blank line before it cannot start a new outer paragraph.)
+      if (prefix && !own && !isBlockStartThatInterrupts(raw, true) && !matchSetext(raw)) {
+        c = prefix + raw;
+      }
+      if (own) prefix = own;
       content.push(c);
       inPara = tr.feed(c);
       i++;
       continue;
     }
     if (isBlank(line)) break;
-    if (!inPara) break;
+    // A lazy line is allowed when a paragraph is open here, or when a
+    // nested quote holds one (cm-250: 'bar' after '> > > foo' continues
+    // the innermost paragraph).
+    if (!inPara && !prefix) break;
     if (isBlockStartThatInterrupts(line, true)) break;
     // A lazy continuation line loses its leading whitespace (cm-238).
     let c = line.replace(/^[ \t]+/, '');
@@ -1371,6 +1398,10 @@ function parseQuote(lines, i, links) {
     // A lazy line that looks like a list item stays paragraph text
     // (cm-238: '- bar' under 'foo' is text, not a nested list).
     if (matchListItem(c)) c = '\x00' + c;
+    // Keep a lazy line at the nested depth (cm-250).
+    if (prefix && !c.startsWith('>') && !c.startsWith('\x00') && !isBlockStartThatInterrupts(c, true)) {
+      c = prefix + c;
+    }
     content.push(c);
     inPara = tr.feed(c);
     i++;
