@@ -143,7 +143,7 @@ function flanking(text, i, j) {
   return { left: !afterWs && (!afterPunct || beforeWs || beforePunct), right: !beforeWs && (!beforePunct || afterWs || afterPunct) };
 }
 
-function inlineParse(text, links) {
+function inlineParse(text, links, inLink) {
   const nodes = [];
   const delims = [];
   const n = text.length;
@@ -282,7 +282,9 @@ function inlineParse(text, links) {
       i++; continue; // soft break: newline stays in run
     }
     if (c === 119 || c === 104) { // w / h: extended autolink
-      if (i === 0 || isWhiteCh(text[i - 1]) || text[i - 1] === '*' || text[i - 1] === '_' || text[i - 1] === '~' || text[i - 1] === '(' || text[i - 1] === '<') {
+      // GFM bare autolinks are plain text inside link text (marked: a
+      // bare URL in a link's text is not linked).
+      if (!inLink && (i === 0 || isWhiteCh(text[i - 1]) || text[i - 1] === '*' || text[i - 1] === '_' || text[i - 1] === '~' || text[i - 1] === '(' || text[i - 1] === '<')) {
         const res = tryExtendedAutolink(text, i);
         if (res) {
           flushText(i);
@@ -293,20 +295,24 @@ function inlineParse(text, links) {
       i++; continue;
     }
     if (c === 58) { // ':': scheme autolink (mailto:, xmpp:, ...)
-      const res = trySchemeAutolink(text, i, runStart);
-      if (res) {
-        flushText(res.start);
-        nodes.push(res.html);
-        i = res.end; runStart = i; continue;
+      if (!inLink) {
+        const res = trySchemeAutolink(text, i, runStart);
+        if (res) {
+          flushText(res.start);
+          nodes.push(res.html);
+          i = res.end; runStart = i; continue;
+        }
       }
       i++; continue;
     }
     if (c === AMP2) { // @: extended email autolink
-      const res = tryExtendedEmail(text, i, runStart);
-      if (res) {
-        flushText(res.start);
-        nodes.push(res.html);
-        i = res.end; runStart = i; continue;
+      if (!inLink) {
+        const res = tryExtendedEmail(text, i, runStart);
+        if (res) {
+          flushText(res.start);
+          nodes.push(res.html);
+          i = res.end; runStart = i; continue;
+        }
       }
       i++; continue;
     }
@@ -466,7 +472,8 @@ function hasInvalidTag(s, links) {
     const c = nx.charCodeAt(0);
     const isTagStart = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 47 || c === 33 || c === 63;
     if (!isTagStart) continue;
-    const r = tryAngle(s, i, links);
+    // A <...> autolink is valid here too, not just a raw HTML tag.
+    const r = tryAutolink(s, i) || tryAngle(s, i, links);
     if (!r) return true;
     i = r.end - 1;
   }
@@ -506,7 +513,9 @@ function tryLink(text, b, links, isImg) {
   }
   // A link's text must not contain an invalid '<' (an unclosed HTML tag).
   if (hasInvalidTag(linkText, links)) return null;
-  const content = inlineParse(linkText, links);
+  // Bare GFM autolinks are plain text inside link text (inLink=true);
+  // <...> autolinks still nest. A '['-style nested link is rejected below.
+  const content = inlineParse(linkText, links, true);
   // A link's text must not contain another '['-style link or a raw HTML
   // <a>, but autolinks inside link text are fine (doc-24). An autolink's
   // text equals its href (up to a 'mailto:' prefix); any other <a> is a
