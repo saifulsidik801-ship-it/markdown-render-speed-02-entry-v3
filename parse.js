@@ -233,7 +233,7 @@ function inlineParse(text, links, inLink) {
       else { canOpen = fl.left && (!fl.right || (i > 0 && isPunctCh(text[i - 1]))); canClose = fl.right && (!fl.left || (j < n && isPunctCh(text[j]))); }
       if (!canOpen && !canClose) { i = j; continue; } // dead delimiter: literal text
       flushText(i);
-      const d = { k: 1, ch, len, canOpen, canClose, top: null };
+      const d = { k: 1, ch, len, olen: len, canOpen, canClose, top: null };
       d.top = d;
       nodes.push(d);
       delims.push(d);
@@ -252,7 +252,7 @@ function inlineParse(text, links, inLink) {
       const canClose = before !== '' && !isWhiteCh(before);
       if (!canOpen && !canClose) { i = j; continue; } // dead delimiter: literal text
       flushText(i);
-      const d = { k: 1, ch: '~', len, canOpen, canClose, top: null };
+      const d = { k: 1, ch: '~', len, olen: len, canOpen, canClose, top: null };
       d.top = d;
       nodes.push(d);
       delims.push(d);
@@ -416,21 +416,29 @@ function findCloseBracket(text, b) {
     const c = text.charCodeAt(j);
     if (c === BSLASH) { j += 2; continue; }
     if (c === TICK) {
+      // A backtick run opens a code span per marked's label regex:
+      // `+(?!`)[^`]*?`+(?!`) — the closing run is the FIRST backtick run
+      // after the opening run, of ANY length (no equal-length rule), so
+      // `` a ` b `` closes at the single backtick and the later `` is
+      // unconsumable (the label fails). If there is no closing run, the
+      // run is consumable only as ``+(?=]) — 2+ backticks immediately
+      // before ']' — otherwise the label is invalid (no link).
       let k = j, len = 0;
       while (k < n && text.charCodeAt(k) === TICK) { k++; len++; }
-      let m = k, found = -1;
+      let m = k, foundEnd = -1;
       while (m < n) {
         if (text.charCodeAt(m) === TICK) {
-          let p = m, l2 = 0;
-          while (p < n && text.charCodeAt(p) === TICK) { p++; l2++; }
-          if (l2 === len) { found = m; break; }
-          m = p;
-        } else m++;
+          let p = m;
+          while (p < n && text.charCodeAt(p) === TICK) p++;
+          foundEnd = p; break;
+        }
+        m++;
       }
-      // An unclosed backtick run is literal text: skip it and keep
-      // scanning for ']' (doc-24: '[client ``commit` tests next](...)').
-      if (found < 0) { j = k; continue; }
-      j = found + len; continue;
+      if (foundEnd < 0) {
+        if (len >= 2 && k < n && text.charCodeAt(k) === RBRACK) { j = k; continue; }
+        return -1;
+      }
+      j = foundEnd; continue;
     }
     if (c === LBRACK) depth++;
     else if (c === RBRACK) { depth--; if (depth === 0) return j; }
@@ -719,6 +727,44 @@ function tryAutolink(text, i) {
 }
 
 // ---------- emphasis (delimiter stack) ----------
+// Simulate marked's emStrong closer-scan from delims[oi] (opener) to
+// delims[ci] (closer), using ORIGINAL run lengths (olen) — marked scans
+// the raw text before any inner emphasis is formed. m starts at the
+// opener length; an opener-like run (canOpen, not canClose) between the
+// opener and closer ADDS its length to m; a closer-like run SUBTRACTS
+// its length; a both-like run is rule-of-3-skipped when y%3!==0 and
+// (y+b)%3===0 and otherwise subtracts. Returns false only when m is
+// still above the closer length AND an opener-like run inflated it —
+// the '*a **b**c*' case (m=3 vs a '*' closer), where marked's scan
+// skips the closer and the outer emphasis never forms. When there is
+// no inflation the opener is merely longer than the closer (cm-442
+// '**foo*'), which partial use (use=1) handles, so the match is allowed.
+function emStrongScanOk(delims, oi, ci) {
+  const opener = delims[oi];
+  const closer = delims[ci];
+  const y = opener.olen;
+  let m = opener.olen;
+  let inflated = false;
+  for (let k = oi + 1; k < ci; k++) {
+    const d = delims[k];
+    if (d.ch !== opener.ch) continue;
+    // A delimiter killed by a different-char emphasis is invisible to
+    // this scan (marked's RDelim first alternative skips '*..' inside
+    // '__..__' and vice versa, cm-470). A delimiter killed by the same
+    // char still counts (its run is in the raw text the scan reads).
+    if (d.dead && d.deadBy && d.deadBy !== opener.ch) continue;
+    const b = d.olen;
+    if (d.canOpen && !d.canClose) { m += b; inflated = true; continue; }
+    if (!d.canOpen && d.canClose) { m -= b; continue; }
+    if (d.canOpen && d.canClose) {
+      if (y % 3 !== 0 && (y + b) % 3 === 0) continue; // rule of 3: skipped
+      m -= b;
+    }
+  }
+  if (m > closer.olen && inflated) return false;
+  return true;
+}
+
 function processEmphasis(nodes, delims) {
   let ci = 0;
   while (ci < delims.length) {
@@ -731,13 +777,24 @@ function processEmphasis(nodes, delims) {
       // Rule of 3: skip when the sum is a multiple of 3, unless BOTH
       // lengths are multiples of 3 (cm-416: '***bar***' matches).
       if ((opener.canClose || closer.canOpen) && ((opener.len + closer.len) % 3 === 0) && (opener.len % 3 !== 0 || closer.len % 3 !== 0)) continue;
+      // Marked's emStrong gate: the opener is scanned for a closer
+      // BEFORE inner strongs form, and an opener-like '**' run between
+      // the opener and closer inflates the required length (m), while a
+      // both-like '**' run followed by a word char is rule-of-3-skipped
+      // and does not reduce it. So '*a **b**c*' never forms the outer
+      // em (m=3, final '*' only reduces it to 2), while '*a **b** c*'
+      // does (the '**' closer is followed by a space and reduces m).
+      if (opener.ch !== '~' && !emStrongScanOk(delims, oi, ci)) continue;
       const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
       wrapEmphasis(nodes, opener, closer, use);
       // Delimiters strictly between the opener and closer are now inside
       // the emphasis and can no longer match (cm-469: the '_' in '_bar'
       // inside '*foo _bar*' must stay literal). Mark them dead (their
-      // literal characters still render).
-      for (let k = oi + 1; k < ci; k++) delims[k].dead = true;
+      // literal characters still render). Record which char killed them:
+      // marked's RDelim first alternative skips a '*' inside a '__..__'
+      // strong (and vice versa), so the emStrong gate must not count a
+      // delimiter killed by a different-char emphasis (cm-470).
+      for (let k = oi + 1; k < ci; k++) { delims[k].dead = true; delims[k].deadBy = opener.ch; }
       matched = true;
       break;
     }
