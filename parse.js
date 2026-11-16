@@ -1764,9 +1764,11 @@ function parseList(lines, i, links) {
       if (inPara && pendingBlank === 0 && !isBlockStartThatInterrupts(line, true)) {
         for (let k = 0; k < pendingBlank; k++) cur.lines.push('');
         pendingBlank = 0;
-        // A lazy continuation line loses leading whitespace up to the
-        // item's content indent (cm-291/312).
-        const c = stripCols(line, cur.contentIndent);
+        // A lazy continuation line keeps its leading whitespace, except
+        // that an indent of 4+ columns loses exactly 4 (the indented-code
+        // indent is consumed even though the text stays in the paragraph:
+        // cm-291 strips 4, doc-06/38 keep 1 space, d1 strips 4 of 6).
+        const c = ind >= 4 ? stripCols(line, 4) : line;
         // If the stripped line looks like a list item, it must stay
         // paragraph text (cm-312: '- e' under 'd' is text, not a nested
         // list). Mark it so parseBlocksInner does not re-parse it as one.
