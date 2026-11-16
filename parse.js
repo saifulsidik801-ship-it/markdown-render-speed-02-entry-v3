@@ -149,6 +149,12 @@ function isDelimChar(c) { return c === 42 || c === 95 || c === 126; }
 // <a> tag is a paragraph and DOES. Reset at the start of parse().
 let inLinkDoc = false;
 
+// Whether a link (not image, not autolink, not raw tag) was emitted while
+// parsing the current link's text (marked's lexer.state.linkEmitted, set
+// by De). tryLink saves/restores it around the link-text parse; if a
+// nested link was emitted, the outer link is discarded. Reset in parse().
+let linkEmittedDoc = false;
+
 // Can this delimiter run open / close? (CommonMark flanking rules.)
 function flanking(text, i, j) {
   // run is text[i..j), char before is text[i-1], after is text[j]
@@ -501,18 +507,42 @@ function parseParenLink(text, k) {
 // True if s contains a '<' that starts an invalid HTML tag/autolink
 // (a '<' followed by a letter, '/', '!' or '?' that tryAngle rejects).
 // Such a '<' in link text makes the whole link fail (cm-524/536).
-function hasInvalidTag(s, links) {
-  for (let i = 0; i < s.length; i++) {
-    if (s.charCodeAt(i) !== 60) continue;
-    const nx = s[i + 1];
-    if (nx === undefined) continue;
-    const c = nx.charCodeAt(0);
-    const isTagStart = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 47 || c === 33 || c === 63;
-    if (!isTagStart) continue;
-    // A <...> autolink is valid here too, not just a raw HTML tag.
-    const r = tryAutolink(s, i) || tryAngle(s, i, links);
-    if (!r) return true;
-    i = r.end - 1;
+// Marked's Be check: a '<...>' construct in a link's text blocks the link
+// ONLY when it is not complete within the text (its closing '>' lies past
+// the link's closing bracket). A complete tag/autolink in the text (even
+// a raw <a>) is fine, and a '<' that starts no valid construct is fine.
+// Code spans are skipped (a '<' inside backticks does not count).
+function hasExtendingTag(text, start, close, links) {
+  const n = text.length;
+  let p = start;
+  while (p < close) {
+    const c = text.charCodeAt(p);
+    if (c === 96) { // backtick: skip the code span
+      let q = p, len = 0;
+      while (q < n && text.charCodeAt(q) === 96) { q++; len++; }
+      let k = q, found = -1;
+      while (k < n) {
+        if (text.charCodeAt(k) === 96) {
+          let m = k, l2 = 0;
+          while (m < n && text.charCodeAt(m) === 96) { m++; l2++; }
+          if (l2 === len) { found = k; break; }
+          k = m;
+        } else k++;
+      }
+      if (found < 0) { p = q; continue; }
+      p = found + len;
+      continue;
+    }
+    if (c !== 60) { p++; continue; } // not '<'
+    const nx = text[p + 1];
+    if (nx === undefined) { p++; continue; }
+    const cc = nx.charCodeAt(0);
+    const isTagStart = (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 47 || cc === 33 || cc === 63;
+    if (!isTagStart) { p++; continue; }
+    const r = tryAutolink(text, p) || tryAngle(text, p, links);
+    if (!r) { p++; continue; }
+    if (r.end > close) return true;
+    p = r.end;
   }
   return false;
 }
@@ -548,33 +578,22 @@ function tryLink(text, b, links, isImg) {
     if (!ref) return null;
     dest = ref.href; title = ref.title; end = j + 1;
   }
-  // A link's text must not contain an invalid '<' (an unclosed HTML tag).
-  if (hasInvalidTag(linkText, links)) return null;
-  // Bare GFM autolinks are plain text inside link text (inLink=true);
-  // <...> autolinks still nest. A '['-style nested link is rejected below.
+  // A '<...>' construct in the link text blocks the link only when it
+  // is not complete within the text (marked's Be check).
+  if (hasExtendingTag(text, b + 1, j, links)) return null;
+  // Parse the link text with inLink=true (bare autolinks are plain text
+  // inside link text). If a nested link is emitted while parsing the
+  // text, the outer link is discarded (marked's De/linkEmitted rule);
+  // images are exempt and do not set the flag. Raw <a> tags and
+  // <...> autolinks in the text do NOT emit a link, so they do not
+  // discard the outer link.
+  const savedEmitted = linkEmittedDoc;
+  linkEmittedDoc = false;
   const content = inlineParse(linkText, links, true);
-  // A link's text must not contain another '['-style link or a raw HTML
-  // <a>, but autolinks inside link text are fine (doc-24). An autolink's
-  // text equals its href (up to a 'mailto:' prefix); any other <a> is a
-  // nested link.
-  if (!isImg) {
-    const unesc = (s) => s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    const re = /<a href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
-    let m;
-    const spans = [];
-    while ((m = re.exec(content)) !== null) {
-      const href = unesc(m[1]);
-      const txt = unesc(stripTags(m[2]));
-      const bare = href.startsWith('mailto:') ? href.slice(7) : href;
-      if (txt !== href && txt !== bare) return null;
-      spans.push([m.index, m.index + m[0].length]);
-    }
-    // Remove vetted autolinks; any remaining <a is a nested link.
-    let cleaned = '', last = 0;
-    for (const [a, b] of spans) { cleaned += content.slice(last, a); last = b; }
-    cleaned += content.slice(last);
-    if (/<a[\s>]/.test(cleaned)) return null;
-  }
+  const nestedLink = linkEmittedDoc;
+  linkEmittedDoc = savedEmitted;
+  if (nestedLink && !isImg) return null;
+  if (!isImg) linkEmittedDoc = true;
   if (isImg) {
     const alt = escAttr(stripTags(content));
     return { html: '<img src="' + cleanUrl(dest) + '" alt="' + alt + '"' + (title !== null ? ' title="' + escAttr(title) + '"' : '') + '>', end };
@@ -993,6 +1012,7 @@ function tryExtendedEmail(text, atIdx, runStart, delims) {
 // ---------- block parsing ----------
 function parse(md) {
   inLinkDoc = false;
+  linkEmittedDoc = false;
   const src = md.replace(/\r\n?/g, '\n');
   const links = new Map();
   // Pre-collect link reference definitions so a link can use a definition
