@@ -1900,8 +1900,15 @@ function parseBlocksInner(src, links, nested = false) {
         if (matchFenceClose(l, fence.ch, fence.len)) { i++; closed = true; break; }
         // Backtick fences strip up to the opening fence's indent from
         // each content line; tilde fences strip nothing (marked's
-        // indent compensation only matches backticks).
-        codeLines.push(fence.ch === '`' ? stripCols(l, fence.indent, true) : l);
+        // indent compensation only matches backticks). A leading tab is
+        // fully consumed by an indented fence (doc-17: '\tindented'
+        // under a 3-space fence becomes 'indented', not ' indented').
+        let content = l;
+        if (fence.ch === '`') {
+          if (fence.indent > 0 && l.charCodeAt(0) === 9) content = l.slice(1);
+          else content = stripCols(l, fence.indent, true);
+        }
+        codeLines.push(content);
         i++;
       }
       // Pop at most one trailing blank line: the artifact of a final
