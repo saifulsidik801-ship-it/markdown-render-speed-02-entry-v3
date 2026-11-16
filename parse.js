@@ -1373,6 +1373,29 @@ function parseHtmlBlock(lines, i, nested = false) {
   return { block: { t: 'html', text }, next: i };
 }
 
+// Whether line c is (or contains, inside quote/list markers) an open
+// paragraph line: a line that a lazy continuation may follow. Recurses
+// through quote markers and list item markers (cm-292/293: a paragraph
+// inside a nested quote inside a list item is open for lazy lines).
+// A line that is itself a block start (fence, heading, list item with
+// non-paragraph content, indented code) is not a paragraph line.
+function paraOpen(c) {
+  let s = c;
+  for (;;) {
+    if (isBlank(s)) return false;
+    if (indentOf(s) >= 4) return false;
+    const raw = stripQuoteMarker(s);
+    if (raw !== null) { s = raw; continue; }
+    const li = matchListItem(s);
+    if (li) {
+      if (li.content === '') return false;
+      s = li.content;
+      continue;
+    }
+    return !isAnyBlockStart(s);
+  }
+}
+
 // Tracks whether content lines are inside a fenced code block or a type 1-5
 // HTML block, so a lazy continuation line is only allowed after a real
 // paragraph line. feed(line) returns whether a lazy line may follow it.
@@ -1409,8 +1432,6 @@ function makeCtxTracker() {
       }
       const f = matchFence(c);
       if (f) { fence = { ch: f.ch, len: f.len }; started = false; return false; }
-      // An indented-code line is not a paragraph line: no lazy continuation.
-      if (indentOf(c) >= 4) return false;
       const hb = matchHtmlBlock(c);
       if (hb && hb.type !== 6 && hb.type !== 7) {
         let name = null;
@@ -1423,7 +1444,8 @@ function makeCtxTracker() {
         if (htmlEnd.test(c)) htmlEnd = null;
         return false;
       }
-      return !isBlank(c) && !isAnyBlockStart(c);
+      // A paragraph line may hide inside quote/list markers (cm-292/293).
+      return paraOpen(c);
     }
   };
 }
